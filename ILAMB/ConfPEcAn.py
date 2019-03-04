@@ -181,6 +181,12 @@ class ConfPEcAn(Confrontation):
         S1 = []; S2 = []; S3 = []; Lobs = []; Lmod = []
         Sobs  = {}; Smod  = {}
         omask = np.zeros(obs.time.size,dtype=int)
+        eobs = np.ones([365,3]); emod = np.ones([365,3])
+        eobs[:,0] *=  1e20; emod[:,0] *=  1e20;
+        eobs[:,1] *= -1e20; emod[:,1] *= -1e20;
+        eobs[:,2]  = 0;     emod[:,2]  = 0;
+        tjulian = np.asarray([range(365),range(1,366)],dtype=float).mean(axis=0)
+        ny = 0
         for y in Y:
 
             # datum for this year
@@ -191,16 +197,23 @@ class ConfPEcAn(Confrontation):
             imod = np.where(y==Ymod)[0]
             if (iobs.size < 0.9*nobs*365): continue
             if (imod.size < 0.9*nmod*365): continue
+            ny += 1
             vobs,tobs = DiurnalReshape(obs.time     [iobs] - datum,
                                        obs.time_bnds[iobs] - datum,
                                        obs.data     [iobs,0])
             vmod,tmod = DiurnalReshape(mod.time     [imod] - datum,
                                        mod.time_bnds[imod] - datum,
                                        mod.data     [imod,0])
-
+            
             # Compute the diurnal magnitude
             vobs = vobs.max(axis=1)-vobs.min(axis=1)
             vmod = vmod.max(axis=1)-vmod.min(axis=1)
+            eobs[:,0] = np.minimum(eobs[:,0],vobs[:365])
+            emod[:,0] = np.minimum(emod[:,0],vmod[:365])
+            eobs[:,1] = np.maximum(eobs[:,1],vobs[:365])
+            emod[:,1] = np.maximum(emod[:,1],vmod[:365])
+            eobs[:,2] += vobs[:365]; emod[:,2] += vmod[:365]
+            
             Sobs[y] = Variable(name = "season_%d" % y,
                                unit = obs.unit,
                                time = tobs,
@@ -216,7 +229,7 @@ class ConfPEcAn(Confrontation):
             Tm  = _findSeasonalTiming  (tmod,vmod)
             Rm  = _findSeasonalCentroid(tmod,vmod)
             dTo = To[1]-To[0]       # season length of the observation
-            a   = np.log(0.1) / 0.5 # 50% relative error equals a score of 1/10
+            a   = np.log(0.1) / 0.5 # 50% relative error equals a score of .1
             s1  = np.exp(a* np.abs(To[0]-Tm[0])/dTo)
             s2  = np.exp(a* np.abs(To[1]-Tm[1])/dTo)
             s3  = np.linalg.norm(np.asarray([Ro[2]-Rm[2],Ro[3]-Rm[3]])) #  |Ro - Rm|
@@ -234,6 +247,9 @@ class ConfPEcAn(Confrontation):
             obs.data.mask[:,0] += (y == Yobs)*(((obs.time-datum) < To[0]) + ((obs.time-datum) > To[1]))
             mod.data.mask[:,0] += (y == Ymod)*(((mod.time-datum) < Tm[0]) + ((mod.time-datum) > Tm[1]))
 
+        eobs[:,2] /= ny
+        emod[:,2] /= ny
+        
         # Seasonal Mean Diurnal Cycle
         ot,omean,o10,o90,opeak = _meanDiurnalCycle(obs,nobs)
         mt,mmean,m10,m90,mpeak = _meanDiurnalCycle(mod,nmod)
@@ -290,6 +306,11 @@ class ConfPEcAn(Confrontation):
             Variable(name = "Season Time of Maximum",
                      unit = "h",
                      data = mpeak).toNetCDF4(results,group="MeanState")
+            Variable(name = "magmean",
+                     unit = mod.unit,
+                     time = tjulian,
+                     data = emod[:,2],
+                     data_bnds = emod[:,:2]).toNetCDF4(results,group="MeanState")
             for key in Smod.keys(): Smod[key].toNetCDF4(results,group="MeanState")
         if not self.master: return
         with Dataset(os.path.join(self.output_path,"%s_Benchmark.nc" % self.name),mode="w") as results:
@@ -315,6 +336,11 @@ class ConfPEcAn(Confrontation):
             Variable(name = "Season Time of Maximum",
                      unit = "h",
                      data = opeak).toNetCDF4(results,group="MeanState")
+            Variable(name = "magmean",
+                     unit = obs.unit,
+                     time = tjulian,
+                     data = eobs[:,2],
+                     data_bnds = eobs[:,:2]).toNetCDF4(results,group="MeanState")
             for key in Sobs.keys(): Sobs[key].toNetCDF4(results,group="MeanState")
 
     def determinePlotLimits(self):
@@ -349,6 +375,24 @@ class ConfPEcAn(Confrontation):
         plots = [v for v in bplts if v in fplts]
         plots.sort()
 
+        plot = "magmean"
+        obs = Variable(filename = bname, variable_name = plot, groupname = "MeanState")
+        mod = Variable(filename = fname, variable_name = plot, groupname = "MeanState")
+        page.addFigure("Diurnal magnitude",
+                       plot,
+                       "MNAME_%s.png" % plot,
+                       side   = "Mean Magnitude",
+                       legend = False)
+        plt.figure(figsize=(5,5),tight_layout=True)
+        plt.polar(obs.time/365.*2*np.pi,obs.data,'-k',alpha=0.45,lw=2)
+        plt.fill_between(obs.time/365.*2*np.pi,obs.data_bnds[:,0],obs.data_bnds[:,1],color='k',alpha=0.25,lw=0)
+        plt.polar(mod.time/365.*2*np.pi,mod.data,'-',color=m.color)
+        plt.fill_between(mod.time/365.*2*np.pi,mod.data_bnds[:,0],mod.data_bnds[:,1],color=m.color,lw=0,alpha=0.3)
+        plt.xticks(bnd_months[:-1]/365.*2*np.pi,lbl_months)
+        plt.ylim(0,self.limits["season"])
+        plt.savefig("%s/%s_%s.png" % (self.output_path,m.name,plot))
+        plt.close()
+        
         for plot in plots:
 
             obs = Variable(filename = bname, variable_name = plot, groupname = "MeanState")
@@ -366,7 +410,7 @@ class ConfPEcAn(Confrontation):
             plt.ylim(0,self.limits["season"])
             plt.savefig("%s/%s_%s.png" % (self.output_path,m.name,plot))
             plt.close()
-
+            
         # mean Diurnal Cycle
         obs = Variable(filename = bname, variable_name = "cycle_mean" , groupname = "MeanState")
         olo = Variable(filename = bname, variable_name = "cycle_lower", groupname = "MeanState")
