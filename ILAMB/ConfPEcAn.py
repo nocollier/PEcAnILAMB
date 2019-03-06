@@ -187,6 +187,8 @@ class ConfPEcAn(Confrontation):
         eobs[:,2]  = 0;     emod[:,2]  = 0;
         tjulian = np.asarray([range(365),range(1,366)],dtype=float).mean(axis=0)
         ny = 0
+        obs_sbegin = {}; obs_send = {}
+        mod_sbegin = {}; mod_send = {}
         for y in Y:
 
             # datum for this year
@@ -242,7 +244,9 @@ class ConfPEcAn(Confrontation):
             S1.append(s1); S2.append(s2); S3.append(s3)
             Lobs.append(To[1]-To[0])
             Lmod.append(Tm[1]-Tm[0])
-
+            obs_sbegin[y] = To[0]; obs_send[y] = To[1];
+            mod_sbegin[y] = Tm[0]; mod_send[y] = Tm[1];
+            
             # mask away the off season
             obs.data.mask[:,0] += (y == Yobs)*(((obs.time-datum) < To[0]) + ((obs.time-datum) > To[1]))
             mod.data.mask[:,0] += (y == Ymod)*(((mod.time-datum) < Tm[0]) + ((mod.time-datum) > Tm[1]))
@@ -267,7 +271,7 @@ class ConfPEcAn(Confrontation):
         S5   = np.exp(-np.abs(ouptake.data-muptake.data)/ouptake.data)
         Lobs = np.asarray(Lobs).mean()
         Lmod = np.asarray(Lmod).mean()
-
+        
         with Dataset(os.path.join(self.output_path,"%s_%s.nc" % (self.name,m.name)),mode="w") as results:
             results.setncatts({"name" :m.name, "color":m.color})
             Variable(name = "Season Length global",
@@ -311,7 +315,9 @@ class ConfPEcAn(Confrontation):
                      time = tjulian,
                      data = emod[:,2],
                      data_bnds = emod[:,:2]).toNetCDF4(results,group="MeanState")
-            for key in Smod.keys(): Smod[key].toNetCDF4(results,group="MeanState")
+            for key in Smod.keys(): Smod[key].toNetCDF4(results,group="MeanState",
+                                                        attributes={"sbegin":mod_sbegin[key],
+                                                                    "send":mod_send[key]})
         if not self.master: return
         with Dataset(os.path.join(self.output_path,"%s_Benchmark.nc" % self.name),mode="w") as results:
             results.setncatts({"name" :"Benchmark", "color":np.asarray([0.5,0.5,0.5])})
@@ -341,7 +347,9 @@ class ConfPEcAn(Confrontation):
                      time = tjulian,
                      data = eobs[:,2],
                      data_bnds = eobs[:,:2]).toNetCDF4(results,group="MeanState")
-            for key in Sobs.keys(): Sobs[key].toNetCDF4(results,group="MeanState")
+            for key in Sobs.keys(): Sobs[key].toNetCDF4(results,group="MeanState",
+                                                        attributes={"sbegin":obs_sbegin[key],
+                                                                    "send":obs_send[key]})
 
     def determinePlotLimits(self):
 
@@ -381,23 +389,22 @@ class ConfPEcAn(Confrontation):
         page.addFigure("Diurnal magnitude",
                        plot,
                        "MNAME_%s.png" % plot,
-                       side   = "Mean Magnitude",
+                       side   = "MEAN / ENVELOPE",
                        legend = False)
         plt.figure(figsize=(5,5),tight_layout=True)
         plt.polar(obs.time/365.*2*np.pi,obs.data,'-k',alpha=0.45,lw=2)
-        plt.fill_between(obs.time/365.*2*np.pi,obs.data_bnds[:,0],obs.data_bnds[:,1],color='k',alpha=0.25,lw=0)
+        plt.fill_between(obs.time/365.*2*np.pi,obs.data_bnds[:,0],obs.data_bnds[:,1],color='k',alpha=0.1,lw=0)
         plt.polar(mod.time/365.*2*np.pi,mod.data,'-',color=m.color)
         plt.fill_between(mod.time/365.*2*np.pi,mod.data_bnds[:,0],mod.data_bnds[:,1],color=m.color,lw=0,alpha=0.3)
         plt.xticks(bnd_months[:-1]/365.*2*np.pi,lbl_months)
         plt.ylim(0,self.limits["season"])
         plt.savefig("%s/%s_%s.png" % (self.output_path,m.name,plot))
         plt.close()
-        
-        for plot in plots:
 
+        # Year polar plots
+        for plot in plots:
             obs = Variable(filename = bname, variable_name = plot, groupname = "MeanState")
             mod = Variable(filename = fname, variable_name = plot, groupname = "MeanState")
-
             page.addFigure("Diurnal magnitude",
                            plot,
                            "MNAME_%s.png" % plot,
@@ -410,6 +417,48 @@ class ConfPEcAn(Confrontation):
             plt.ylim(0,self.limits["season"])
             plt.savefig("%s/%s_%s.png" % (self.output_path,m.name,plot))
             plt.close()
+
+        # Season beginning / ending plots
+        def _createSeasonTimingPlot(name):
+            page.addFigure("Seasonal Diurnal Cycle",
+                           name,
+                           "MNAME_%s.png" % name,
+                           side   = "SEASON %s" % (name[1:].upper()),
+                           legend = False)
+            fig,ax = plt.subplots(figsize=(8,4.5),tight_layout=True)
+            slimits = [1e20,-1e20]
+            for plot in plots:
+                cond = plot == plots[0]
+                obs = Variable(filename = bname, variable_name = plot, groupname = "MeanState")
+                mod = Variable(filename = fname, variable_name = plot, groupname = "MeanState")
+                ax.plot(obs.time,obs.data,'-k',alpha=0.2,lw=2,label=self.name if cond else None)
+                ax.plot(mod.time,mod.data,'-',alpha=0.4,color=m.color,label=m.name if cond else None)
+                with Dataset(bname) as dset:
+                    v = dset.groups["MeanState"].variables[plot]
+                    slim = v.getncattr(name)
+                    slimits = [min(slimits[0],slim),max(slimits[1],slim)]
+                    ax.plot(slim,obs.data[obs.time.searchsorted(slim)],'ok',
+                            label="%s Season %s" % (self.name,name[1:].capitalize()) if cond else None)
+                with Dataset(fname) as dset:
+                    v = dset.groups["MeanState"].variables[plot]
+                    slim = v.getncattr(name)
+                    slimits = [min(slimits[0],slim),max(slimits[1],slim)]
+                    ax.plot(slim,mod.data[mod.time.searchsorted(slim)],'o',color=m.color,
+                            label="%s Season %s" % (m.name,name[1:].capitalize()) if cond else None)
+            slimits  = np.asarray(slimits)
+            slimits += np.asarray([-1,1])*(np.diff(slimits))
+            ax.legend(bbox_to_anchor=(0,1.005,1,0.25),loc='lower left',mode='expand',ncol=2,borderaxespad=0,frameon=False)
+            ax.set_xlim(slimits)
+            ind = np.where((bnd_months>=slimits[0])*(bnd_months<=slimits[1]))[0]
+            ax.set_xticks(bnd_months[ind])
+            ax.set_xticklabels(np.asarray(lbl_months)[ind])
+            ax.set_ylim(0,self.limits["season"])
+            ax.grid(True)
+            ax.set_ylabel(post.UnitStringToMatplotlib(obs.unit))
+            fig.savefig("%s/%s_%s.png" % (self.output_path,m.name,name))
+            plt.close()
+        _createSeasonTimingPlot("sbegin")
+        _createSeasonTimingPlot("send")
             
         # mean Diurnal Cycle
         obs = Variable(filename = bname, variable_name = "cycle_mean" , groupname = "MeanState")
