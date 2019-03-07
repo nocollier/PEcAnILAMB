@@ -268,7 +268,7 @@ class ConfPEcAn(Confrontation):
         S3   = np.asarray(S3  ).mean()
         S4   = abs(opeak-mpeak)/12.
         S4   = 1 - ((S4>1)*(1-S4) + (S4<=1)*S4)
-        S5   = np.exp(-np.abs(ouptake.data-muptake.data)/ouptake.data)
+        S5   = np.exp(-np.abs((ouptake.data-muptake.data)/ouptake.data))
         Lobs = np.asarray(Lobs).mean()
         Lmod = np.asarray(Lmod).mean()
         
@@ -454,7 +454,7 @@ class ConfPEcAn(Confrontation):
             ax.set_xticklabels(np.asarray(lbl_months)[ind])
             ax.set_ylim(0,self.limits["season"])
             ax.grid(True)
-            ax.set_ylabel(post.UnitStringToMatplotlib(obs.unit))
+            ax.set_ylabel("Diurnal Magnitude %s" % (post.UnitStringToMatplotlib(obs.unit)))
             fig.savefig("%s/%s_%s.png" % (self.output_path,m.name,name))
             plt.close()
         _createSeasonTimingPlot("sbegin")
