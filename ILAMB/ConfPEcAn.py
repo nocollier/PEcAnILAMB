@@ -268,7 +268,8 @@ class ConfPEcAn(Confrontation):
         S3   = np.asarray(S3  ).mean()
         S4   = abs(opeak-mpeak)/12.
         S4   = 1 - ((S4>1)*(1-S4) + (S4<=1)*S4)
-        S5   = np.exp(-np.abs((ouptake.data-muptake.data)/ouptake.data))
+        with np.errstate(under='ignore',over='ignore'):
+            S5 = np.exp(-np.abs((ouptake.data-muptake.data)/ouptake.data))
         Lobs = np.asarray(Lobs).mean()
         Lmod = np.asarray(Lmod).mean()
         
