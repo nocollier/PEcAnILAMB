@@ -19,3 +19,6 @@
   - We will want to compare relationships against met drivers which are not part of the AMF observational files (is that true?). This is not standard output from PEcAn and thus we would need to either appeal to PEcAn to add it or write some ILAMB-PEcAn interface code which could harvest the information.
   - The variable to variable analysis is a good start, but we may also like to port Jitu's multilinear analysis into what drives the beginning and ending of seasons.
 * We need to think about what PEcAn outputs we want to examine. For now we are comparing versus the median from a run, but we would like to in the future expand the analysis to better understand how parameter/forcing uncertainty affects these seasonal metrics.
+
+Build in diurnal and seasonal response function benchmarks
+ - eg. GPP vs T, T vs Resp, radiation vs ET, etc.  So have flux comparison by also response surface comparisons at the faster timescales.  Can we match the average diurnal functional response surfaces?
