@@ -3,7 +3,6 @@ from ILAMB.Confrontation import getVariableList
 import matplotlib.pyplot as plt
 from ILAMB import Post as post
 from scipy.interpolate import CubicSpline
-from mpl_toolkits.basemap import Basemap
 from ILAMB.Variable import Variable
 from netCDF4 import Dataset
 from ILAMB import ilamblib as il
@@ -12,6 +11,10 @@ import os,glob
 from ILAMB.constants import lbl_months,bnd_months
 from cf_units import Unit
 import cftime
+
+# FIX: plotting weirdness
+# FIX: timing of maximum score
+# FIX: mean/envelope when mod data exists but not obs
 
 def _meanDiurnalCycle(var,n):
     begin = np.argmin(var.time[:(n-1)]%n)
@@ -146,12 +149,6 @@ class ConfPEcAn(Confrontation):
                                   convert_calendar = False,
                                   lats         = None if obs.spatial else obs.lat,
                                   lons         = None if obs.spatial else obs.lon)
-        
-        # Handle molar mass, migrate to ILAMB.Variable.convert()
-        if (np.any([Unit(u).is_convertible("g")   for u in mod.unit.split()]) and
-            np.any([Unit(u).is_convertible("mol") for u in obs.unit.split()])):
-            if self.variable in ["gpp","nee","reco"]:
-                mod.unit = str(Unit(mod.unit) / Unit("12.0107 g mol-1"))
             
         # When we make things comparable, sites can get pruned, we
         # also need to prune the site labels
@@ -167,7 +164,7 @@ class ConfPEcAn(Confrontation):
 
         # Grab the data
         obs,mod = self.stageData(m)
-                 
+        
         # Number of data points per day
         nobs = int(np.round(1./np.diff(obs.time).mean()))
         nmod = int(np.round(1./np.diff(mod.time).mean()))
@@ -197,8 +194,10 @@ class ConfPEcAn(Confrontation):
             # Reshape the year's worth of data
             iobs = np.where(y==Yobs)[0]
             imod = np.where(y==Ymod)[0]
-            if (iobs.size < 0.9*nobs*365): continue
-            if (imod.size < 0.9*nmod*365): continue
+            if (iobs.size < 0.99*nobs*365): continue
+            if (imod.size < 0.99*nmod*365): continue
+            if (obs.data[iobs,0].mask.all()): continue
+            if (mod.data[imod,0].mask.all()): continue
             ny += 1
             vobs,tobs = DiurnalReshape(obs.time     [iobs] - datum,
                                        obs.time_bnds[iobs] - datum,
@@ -451,6 +450,7 @@ class ConfPEcAn(Confrontation):
             ax.legend(bbox_to_anchor=(0,1.005,1,0.25),loc='lower left',mode='expand',ncol=2,borderaxespad=0,frameon=False)
             ax.set_xlim(slimits)
             ind = np.where((bnd_months>=slimits[0])*(bnd_months<=slimits[1]))[0]
+            while ind[-1] >= 12: ind = ind[:-1]
             ax.set_xticks(bnd_months[ind])
             ax.set_xticklabels(np.asarray(lbl_months)[ind])
             ax.set_ylim(0,self.limits["season"])
