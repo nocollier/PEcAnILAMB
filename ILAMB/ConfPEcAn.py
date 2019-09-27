@@ -1,48 +1,19 @@
 from ILAMB.Confrontation import Confrontation
-from ILAMB.Confrontation import getVariableList
-import matplotlib.pyplot as plt
-from ILAMB import Post as post
-from scipy.interpolate import CubicSpline
 from ILAMB.Variable import Variable
+from ILAMB.constants import bnd_months,lbl_months
+import matplotlib.pyplot as plt
+import ILAMB.ilamblib as il
+import ILAMB.Post as post
 from netCDF4 import Dataset
-from ILAMB import ilamblib as il
 import numpy as np
-import os,glob
-from ILAMB.constants import lbl_months,bnd_months
-from cf_units import Unit
 import cftime
+import os
+import glob
 
-# FIX: plotting weirdness
-# FIX: timing of maximum score
-# FIX: mean/envelope when mod data exists but not obs
+class NotEnoughDataInYear(Exception):
+    def __str__(self): return "NotEnoughDataInYear"
 
-def _meanDiurnalCycle(var,n):
-    begin = np.argmin(var.time[:(n-1)]%n)
-    end   = begin+int(var.time[begin:].size/float(n))*n
-    vmean = var.data[begin:end].reshape((-1,n))
-    vmean = vmean[np.where(vmean.mask.any(axis=1)==False)]
-    per   = np.percentile(vmean,[10,90],axis=0)
-    per10 = per[0,:]
-    per90 = per[1,:]
-    np.seterr(under='ignore',over='ignore')
-    vmean = vmean.mean(axis=0)
-    np.seterr(under='raise',over='raise')
-    t     = np.linspace(0,24,n+1)[:-1]
-    tmax  = t[vmean.argmax()]
-    return t,vmean,per10,per90,tmax
-
-def DiurnalReshape(time,time_bnds,data):
-    dt    = (time_bnds[:,1]-time_bnds[:,0])[:-1]
-    dt    = dt.mean()
-    spd   = int(round(1./dt))
-    begin = np.argmin(time[:(spd-1)]%spd)
-    end   = begin+int(time[begin:].size/float(spd))*spd
-    shp   = (-1,spd) + data.shape[1:]
-    cycle = data[begin:end].reshape(shp)
-    t     = time[begin:end].reshape(shp).mean(axis=1)
-    return cycle,t
-
-def _findSeasonalTiming(t,x):
+def findSeasonalTiming(t,x):
     """Return the beginning and ending time of the season of x.
 
     The data x is assumed to start out relatively small, pass through
@@ -82,7 +53,7 @@ def _findSeasonalTiming(t,x):
     e = I[C.argmin()]
     return t[[b,e]]
 
-def _findSeasonalCentroid(t,x):
+def findSeasonalCentroid(t,x):
     """Return the centroid of the season in polar and cartesian coordinates.
 
     Parameters
@@ -101,7 +72,96 @@ def _findSeasonalCentroid(t,x):
     y0 = (x*np.sin(t/365.*2*np.pi)).mean()
     r0 = np.sqrt(x0*x0+y0*y0)
     a0 = np.arctan2(y0,x0)
-    return r0,a0,x0,y0
+    return {"r":r0,"theta":a0,"x":x0,"y":y0}
+
+def getDiurnalDataForGivenYear(var,year):
+    """
+    """
+
+    # Get this year's data, make sure there is enough
+    spd   = int(round(1/np.diff(var.time_bnds,axis=1).mean()))
+    datum = cftime.date2num(cftime.datetime(year,1,1),"days since 1850-1-1")
+    ind   = np.where(year==var.year)[0]
+    t     = var.time     [ind]-datum
+    tb    = var.time_bnds[ind]-datum
+    data  = var.data     [ind,0]
+    if ind.size < spd*360 or data.mask.any(): raise NotEnoughDataInYear
+
+    # Reshape the data
+    begin = np.argmin(t[:(spd-1)]%spd)
+    end   = begin+int(t[begin:].size/float(spd))*spd
+    shp   = (-1,spd) + data.shape[1:]
+    data  = data[begin:end].reshape(shp)
+    t     = t   [begin:end].reshape(shp).mean(axis=1)
+
+    # Diurnal magnitude
+    mag = Variable(name = "mag%d" % year,
+                   unit = var.unit,
+                   time = t,
+                   data = data.max(axis=1)-data.min(axis=1))
+    season   = findSeasonalTiming(mag.time,mag.data)
+    centroid = findSeasonalCentroid(mag.time,mag.data)
+    mag.season = season
+    mag.centroid = centroid
+
+    # Mask out off season
+    mask = (t<season[0])+(t>season[1])
+    data = np.ma.masked_array(data,mask=mask[:,np.newaxis]*np.ones(data.shape[1],dtype=bool))
+
+    # Mean seasonal diurnal cycle
+    uncert = np.zeros((data.shape[1],2))
+    for i in range(data.shape[1]):
+        d = data[:,i].compressed()
+        if d.size == 0: continue
+        uncert[i,:] = np.percentile(d,[10,90])
+    day = np.linspace(0,1,spd+1); day = 0.5*(day[:-1]+day[1:])
+    with np.errstate(under='ignore',over='ignore'):
+        cycle = Variable(name = "cycle%d" % year,
+                         unit = var.unit,
+                         time = day,
+                         data = data.mean(axis=0),
+                         data_bnds = uncert)
+
+    # Mean seasonal uptake
+    uptake = Variable(unit      = var.unit,
+                      time      = var.time     [ind]-datum,
+                      time_bnds = var.time_bnds[ind]-datum,
+                      data      = var.data     [ind,0])
+    uptake.data = np.ma.masked_array(uptake.data,mask=((uptake.time<season[0])+(uptake.time>season[1])))
+    uptake = uptake.integrateInTime(mean=True)
+    cycle.uptake = uptake.data
+
+    # Timing of peak seasonal cycle, could be a maximum or minimum,
+    # check second derivative of a best-fit parabola to the daytime
+    # data.
+    begin = int(spd  /4)
+    end   = int(spd*3/4)
+    p = np.polyfit(cycle.time[begin:end],cycle.data[begin:end],2)
+    if p[0] < 0:
+        cycle.peak = day[cycle.data.argmax()]*24
+    else:
+        cycle.peak = day[cycle.data.argmin()]*24
+
+    return mag,cycle
+
+
+def DiurnalScalars(obs_mag,mod_mag,obs_cycle,mod_cycle):
+    """
+    """
+    score_scaling = np.log(0.1) / 0.5  # 50% relative error equals a score of .1
+    obs_season_length = obs_mag.season[1]-obs_mag.season[0]
+    score_sbegin = np.exp(score_scaling*np.abs(mod_mag.season[0]-obs_mag.season[0])/obs_season_length)
+    score_send   = np.exp(score_scaling*np.abs(mod_mag.season[1]-obs_mag.season[1])/obs_season_length)
+    obs_centroid = np.linalg.norm([obs_mag.centroid['x'],obs_mag.centroid['y']])
+    score_centroid = np.linalg.norm([mod_mag.centroid['x']-obs_mag.centroid['x'],
+                                     mod_mag.centroid['y']-obs_mag.centroid['y']]) / obs_centroid
+    score_centroid = np.exp(-score_centroid)
+    score_peak = np.abs(mod_cycle.peak-obs_cycle.peak)/12.
+    score_peak = 1-(score_peak>1)*(1-score_peak)-(score_peak<=1)*score_peak
+    score_uptake = 0
+    with np.errstate(under='ignore',over='ignore'):
+        score_uptake = np.exp(-np.abs((mod_cycle.uptake-obs_cycle.uptake)/obs_cycle.uptake))
+    return score_sbegin,score_send,score_centroid,score_peak,score_uptake
 
 class ConfPEcAn(Confrontation):
     """A confrontation for examining the diurnal
@@ -111,13 +171,20 @@ class ConfPEcAn(Confrontation):
         # Calls the regular constructor
         super(ConfPEcAn,self).__init__(**keywords)
 
+        obs = Variable(filename       = self.source,
+                       variable_name  = self.variable,
+                       alternate_vars = self.alternate_vars,
+                       convert_calendar = False)
+        self.years = np.asarray([t.year for t in cftime.num2date(obs.time,"days since 1850-1-1")],dtype=int)
+        self.years = np.unique(self.years)
+
         # Setup a html layout for generating web views of the results
         pages = []
 
         # Mean State page
         pages.append(post.HtmlPage("MeanState","Mean State"))
         pages[-1].setHeader("CNAME / RNAME / MNAME")
-        pages[-1].setSections(["Seasonal Diurnal Cycle","Diurnal magnitude"])
+        pages[-1].setSections(["Seasonal Diurnal Cycle",]+["%d" % y for y in self.years])
         pages.append(post.HtmlAllModelsPage("AllModels","All Models"))
         pages[-1].setHeader("CNAME / RNAME")
         pages[-1].setSections([])
@@ -129,7 +196,7 @@ class ConfPEcAn(Confrontation):
             for attr in dset.ncattrs():
                 a = dset.getncattr(attr)
                 if 'astype' in dir(a): a = a.astype('str')
-                if 'encode' in dir(a): a = a.encode('ascii','ignore')                
+                if 'encode' in dir(a): a = a.encode('ascii','ignore')
                 pages[-1].text += "<p><b>&nbsp;&nbsp;%s:&nbsp;</b>%s</p>\n" % (attr,a)
         self.layout = post.HtmlLayout(pages,self.longname)
 
@@ -149,220 +216,150 @@ class ConfPEcAn(Confrontation):
                                   convert_calendar = False,
                                   lats         = None if obs.spatial else obs.lat,
                                   lons         = None if obs.spatial else obs.lon)
-            
+
         # When we make things comparable, sites can get pruned, we
         # also need to prune the site labels
         lat = np.copy(obs.lat); lon = np.copy(obs.lon)
-        obs,mod = il.MakeComparable(obs,mod,clip_ref=True,prune_sites=True,allow_diff_times=True)
-        
+        obs,mod = il.MakeComparable(obs,mod,clip_ref=False,prune_sites=True,allow_diff_times=True)
+
         return obs,mod
 
     def confront(self,m):
 
-        # get the HTML page
-        page = [page for page in self.layout.pages if "MeanState" in page.name][0]
-
         # Grab the data
         obs,mod = self.stageData(m)
-        
-        # Number of data points per day
-        nobs = int(np.round(1./np.diff(obs.time).mean()))
-        nmod = int(np.round(1./np.diff(mod.time).mean()))
-        
-        # Analysis on a per year basis
-        Tobs = cftime.num2date(obs.time,"days since 1850-1-1")
-        Tmod = cftime.num2date(mod.time,"days since 1850-1-1")
-        Yobs = np.asarray([t.year for t in Tobs],dtype=int)
-        Ymod = np.asarray([t.year for t in Tmod],dtype=int)
-        Y    = np.unique(Yobs)
-        S1 = []; S2 = []; S3 = []; Lobs = []; Lmod = []
-        Sobs  = {}; Smod  = {}
-        omask = np.zeros(obs.time.size,dtype=int)
-        eobs = np.ones([365,3]); emod = np.ones([365,3])
-        eobs[:,0] *=  1e20; emod[:,0] *=  1e20;
-        eobs[:,1] *= -1e20; emod[:,1] *= -1e20;
-        eobs[:,2]  = 0;     emod[:,2]  = 0;
-        tjulian = np.asarray([range(365),range(1,366)],dtype=float).mean(axis=0)
-        ny = 0
-        obs_sbegin = {}; obs_send = {}
-        mod_sbegin = {}; mod_send = {}
-        for y in Y:
 
-            # datum for this year
-            datum = cftime.date2num(cftime.datetime(y,1,1),"days since 1850-1-1")
-            
-            # Reshape the year's worth of data
-            iobs = np.where(y==Yobs)[0]
-            imod = np.where(y==Ymod)[0]
-            if (iobs.size < 0.99*nobs*365): continue
-            if (imod.size < 0.99*nmod*365): continue
-            if (obs.data[iobs,0].mask.all()): continue
-            if (mod.data[imod,0].mask.all()): continue
-            ny += 1
-            vobs,tobs = DiurnalReshape(obs.time     [iobs] - datum,
-                                       obs.time_bnds[iobs] - datum,
-                                       obs.data     [iobs,0])
-            vmod,tmod = DiurnalReshape(mod.time     [imod] - datum,
-                                       mod.time_bnds[imod] - datum,
-                                       mod.data     [imod,0])
-            
-            # Compute the diurnal magnitude
-            vobs = vobs.max(axis=1)-vobs.min(axis=1)
-            vmod = vmod.max(axis=1)-vmod.min(axis=1)
-            eobs[:,0] = np.minimum(eobs[:,0],vobs[:365])
-            emod[:,0] = np.minimum(emod[:,0],vmod[:365])
-            eobs[:,1] = np.maximum(eobs[:,1],vobs[:365])
-            emod[:,1] = np.maximum(emod[:,1],vmod[:365])
-            eobs[:,2] += vobs[:365]; emod[:,2] += vmod[:365]
-            
-            Sobs[y] = Variable(name = "season_%d" % y,
-                               unit = obs.unit,
-                               time = tobs,
-                               data = vobs)
-            Smod[y] = Variable(name = "season_%d" % y,
-                               unit = mod.unit,
-                               time = tmod,
-                               data = vmod)
+        # What years does the analysis run over?
+        obs.year = np.asarray([t.year for t in cftime.num2date(obs.time,"days since 1850-1-1")],dtype=int)
+        mod.year = np.asarray([t.year for t in cftime.num2date(mod.time,"days since 1850-1-1")],dtype=int)
 
-            # Compute metrics
-            To  = _findSeasonalTiming  (tobs,vobs)
-            Ro  = _findSeasonalCentroid(tobs,vobs)
-            Tm  = _findSeasonalTiming  (tmod,vmod)
-            Rm  = _findSeasonalCentroid(tmod,vmod)
-            dTo = To[1]-To[0]       # season length of the observation
-            a   = np.log(0.1) / 0.5 # 50% relative error equals a score of .1
-            s1  = np.exp(a* np.abs(To[0]-Tm[0])/dTo)
-            s2  = np.exp(a* np.abs(To[1]-Tm[1])/dTo)
-            s3  = np.linalg.norm(np.asarray([Ro[2]-Rm[2],Ro[3]-Rm[3]])) #  |Ro - Rm|
-            den = np.linalg.norm(np.asarray([      Ro[2],      Ro[3]])) # /|Ro|
-            if den < 1e-12 or np.isnan(den):
-                s3  = 0.
-            else:
-                s3 /= den
-                s3  = np.exp(-s3)
-            S1.append(s1); S2.append(s2); S3.append(s3)
-            Lobs.append(To[1]-To[0])
-            Lmod.append(Tm[1]-Tm[0])
-            obs_sbegin[y] = To[0]; obs_send[y] = To[1];
-            mod_sbegin[y] = Tm[0]; mod_send[y] = Tm[1];
-            
-            # mask away the off season
-            obs.data.mask[:,0] += (y == Yobs)*(((obs.time-datum) < To[0]) + ((obs.time-datum) > To[1]))
-            mod.data.mask[:,0] += (y == Ymod)*(((mod.time-datum) < Tm[0]) + ((mod.time-datum) > Tm[1]))
+        # Analysis
+        mod_file = os.path.join(self.output_path,"%s_%s.nc"        % (self.name,m.name))
+        obs_file = os.path.join(self.output_path,"%s_Benchmark.nc" % (self.name,      ))
+        with il.FileContextManager(self.master,mod_file,obs_file) as fcm:
 
-        eobs[:,2] /= ny
-        emod[:,2] /= ny
-        
-        # Seasonal Mean Diurnal Cycle
-        ot,omean,o10,o90,opeak = _meanDiurnalCycle(obs,nobs)
-        mt,mmean,m10,m90,mpeak = _meanDiurnalCycle(mod,nmod)
+            # Encode some names and colors
+            fcm.mod_dset.setncatts({"name" :m.name,
+                                    "color":m.color,
+                                    "complete":0})
+            if self.master:
+                fcm.obs_dset.setncatts({"name" :"Benchmark",
+                                        "color":np.asarray([0.5,0.5,0.5]),
+                                        "complete":0})
 
-        # Seasonal Mean Daily Uptake
-        ouptake = obs.integrateInTime(mean=True)
-        muptake = mod.integrateInTime(mean=True)
+            Osbegin = []; Osend = []; Oslen = []; Opeak = []; Ouptake = []
+            Msbegin = []; Msend = []; Mslen = []; Mpeak = []; Muptake = []
+            Ssbegin = []; Ssend = []; Scentroid = []; Speak = []; Suptake = []
+            obs_years = 0; mod_years = 0
+            for y in self.years:
 
-        # Score by mean values across years
-        S1   = np.asarray(S1  ).mean()
-        S2   = np.asarray(S2  ).mean()
-        S3   = np.asarray(S3  ).mean()
-        S4   = abs(opeak-mpeak)/12.
-        S4   = 1 - ((S4>1)*(1-S4) + (S4<=1)*S4)
-        with np.errstate(under='ignore',over='ignore'):
-            S5 = np.exp(-np.abs((ouptake.data-muptake.data)/ouptake.data))
-        Lobs = np.asarray(Lobs).mean()
-        Lmod = np.asarray(Lmod).mean()
-        
-        with Dataset(os.path.join(self.output_path,"%s_%s.nc" % (self.name,m.name)),mode="w") as results:
-            results.setncatts({"name" :m.name, "color":m.color})
-            Variable(name = "Season Length global",
-                     unit = "d",
-                     data = Lmod).toNetCDF4(results,group="MeanState")
-            Variable(name = "Season Beginning Score global",
-                     unit = "1",
-                     data = S1).toNetCDF4(results,group="MeanState")
-            Variable(name = "Season Ending Score global",
-                     unit = "1",
-                     data = S2).toNetCDF4(results,group="MeanState")
-            Variable(name = "Season Strength Score global",
-                     unit = "1",
-                     data = S3).toNetCDF4(results,group="MeanState")
-            Variable(name = "Diurnal Max Timing Score global",
-                     unit = "1",
-                     data = S4).toNetCDF4(results,group="MeanState")
-            Variable(name = "Daily Uptake Score global",
-                     unit = "1",
-                     data = S5).toNetCDF4(results,group="MeanState")
-            Variable(name = "cycle_mean",
-                     unit = mod.unit,
-                     time = mt,
-                     data = mmean).toNetCDF4(results,group="MeanState")
-            Variable(name = "cycle_lower",
-                     unit = mod.unit,
-                     time = mt,
-                     data = m10).toNetCDF4(results,group="MeanState")
-            Variable(name = "cycle_upper",
-                     unit = mod.unit,
-                     time = mt,
-                     data = m90).toNetCDF4(results,group="MeanState")
-            Variable(name = "Season Mean Daily Uptake",
-                     unit = muptake.unit,
-                     data = muptake.data).toNetCDF4(results,group="MeanState")
-            Variable(name = "Season Time of Maximum",
-                     unit = "h",
-                     data = mpeak).toNetCDF4(results,group="MeanState")
-            Variable(name = "magmean",
-                     unit = mod.unit,
-                     time = tjulian,
-                     data = emod[:,2],
-                     data_bnds = emod[:,:2]).toNetCDF4(results,group="MeanState")
-            for key in Smod.keys(): Smod[key].toNetCDF4(results,group="MeanState",
-                                                        attributes={"sbegin":mod_sbegin[key],
-                                                                    "send":mod_send[key]})
-        if not self.master: return
-        with Dataset(os.path.join(self.output_path,"%s_Benchmark.nc" % self.name),mode="w") as results:
-            results.setncatts({"name" :"Benchmark", "color":np.asarray([0.5,0.5,0.5])})
-            Variable(name = "Season Length global",
-                     unit = "d",
-                     data = Lobs).toNetCDF4(results,group="MeanState")
-            Variable(name = "cycle_mean",
-                     unit = obs.unit,
-                     time = ot,
-                     data = omean).toNetCDF4(results,group="MeanState")
-            Variable(name = "cycle_lower",
-                     unit = obs.unit,
-                     time = ot,
-                     data = o10).toNetCDF4(results,group="MeanState")
-            Variable(name = "cycle_upper",
-                     unit = obs.unit,
-                     time = ot,
-                     data = o90).toNetCDF4(results,group="MeanState")
-            Variable(name = "Season Mean Daily Uptake",
-                     unit = ouptake.unit,
-                     data = ouptake.data).toNetCDF4(results,group="MeanState")
-            Variable(name = "Season Time of Maximum",
-                     unit = "h",
-                     data = opeak).toNetCDF4(results,group="MeanState")
-            Variable(name = "magmean",
-                     unit = obs.unit,
-                     time = tjulian,
-                     data = eobs[:,2],
-                     data_bnds = eobs[:,:2]).toNetCDF4(results,group="MeanState")
-            for key in Sobs.keys(): Sobs[key].toNetCDF4(results,group="MeanState",
-                                                        attributes={"sbegin":obs_sbegin[key],
-                                                                    "send":obs_send[key]})
+                # First try to get the obs for this year, might not
+                # have enough info in which case we skip the year.
+                try:
+                    obs_mag,obs_cycle = getDiurnalDataForGivenYear(obs,y)
+                except NotEnoughDataInYear:
+                    continue
+
+                # Output what we must even if the model doesn't have
+                # data here.
+                obs_years += 1
+                Osbegin.append(obs_mag.season[0])
+                Osend  .append(obs_mag.season[1])
+                Oslen  .append(obs_mag.season[1]-obs_mag.season[0])
+                Opeak  .append(obs_cycle.peak)
+                Ouptake.append(obs_cycle.uptake)
+                if self.master:
+                    obs_mag.toNetCDF4(fcm.obs_dset,group="MeanState",
+                                      attributes={"sbegin":obs_mag.season[0],
+                                                  "send":obs_mag.season[1]})
+                    obs_cycle.toNetCDF4(fcm.obs_dset,group="MeanState",
+                                        attributes={"uptake":obs_cycle.uptake,
+                                                    "peak":obs_cycle.peak})
+
+                # Try to get enough data from the model to operate
+                try:
+                    mod_mag,mod_cycle = getDiurnalDataForGivenYear(mod,y)
+                except NotEnoughDataInYear:
+                    continue
+
+                mod_years += 1
+                Msbegin.append(mod_mag.season[0])
+                Msend  .append(mod_mag.season[1])
+                Mslen  .append(mod_mag.season[1]-mod_mag.season[0])
+                Mpeak  .append(mod_cycle.peak)
+                Muptake.append(mod_cycle.uptake)
+                mod_mag.toNetCDF4(fcm.mod_dset,group="MeanState",
+                                  attributes={"sbegin":mod_mag.season[0],
+                                              "send":mod_mag.season[1]})
+                mod_cycle.toNetCDF4(fcm.mod_dset,group="MeanState",
+                                    attributes={"uptake":mod_cycle.uptake,
+                                                "peak":mod_cycle.peak})
+
+                # Get scores for this year
+                ssbegin,ssend,scentroid,speak,suptake = DiurnalScalars(obs_mag,mod_mag,obs_cycle,mod_cycle)
+                Ssbegin.append(ssbegin); Ssend.append(ssend)
+                Scentroid.append(scentroid); Speak.append(speak)
+                Suptake.append(suptake)
+
+            # Output mean scores/scalars
+            if self.master:
+                Variable(name = "Number of Years global",unit="1",
+                         data = obs_years).toNetCDF4(fcm.obs_dset,group="MeanState")
+                Variable(name = "Season Beginning global",unit="d",
+                         data = np.asarray(Osbegin).mean()).toNetCDF4(fcm.obs_dset,group="MeanState")
+                Variable(name = "Season Ending global",unit="d",
+                         data = np.asarray(Osend).mean()).toNetCDF4(fcm.obs_dset,group="MeanState")
+                Variable(name = "Season Length global",unit="d",
+                         data = np.asarray(Oslen).mean()).toNetCDF4(fcm.obs_dset,group="MeanState")
+                Variable(name = "Diurnal Peak Timing global",unit="h",
+                         data = np.asarray(Opeak).mean()).toNetCDF4(fcm.obs_dset,group="MeanState")
+                Variable(name = "Mean Season Uptake global",unit=obs.unit,
+                         data = np.asarray(Ouptake).mean()).toNetCDF4(fcm.obs_dset,group="MeanState")
+            Variable(name = "Number of Years global",unit="1",
+                     data = mod_years).toNetCDF4(fcm.mod_dset,group="MeanState")
+            Variable(name = "Season Beginning global",unit="d",
+                     data = np.asarray(Msbegin).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+            Variable(name = "Season Ending global",unit="d",
+                     data = np.asarray(Msend).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+            Variable(name = "Season Length global",unit="d",
+                     data = np.asarray(Mslen).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+            Variable(name = "Diurnal Peak Timing global",unit="h",
+                     data = np.asarray(Mpeak).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+            Variable(name = "Mean Season Uptake global",unit=mod.unit,
+                     data = np.asarray(Muptake).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+            Variable(name = "Season Beginning Score global",unit="1",
+                     data = np.asarray(Ssbegin).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+            Variable(name = "Season Ending Score global",unit="1",
+                     data = np.asarray(Ssend).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+            Variable(name = "Season Strength Score global",unit="1",
+                     data = np.asarray(Scentroid).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+            Variable(name = "Diurnal Peak Timing Score global",unit="1",
+                     data = np.asarray(Speak).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+            Variable(name = "Diurnal Uptake Score global",unit="1",
+                     data = np.asarray(Suptake).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+
+            # Flag complete
+            fcm.mod_dset.complete = 1
+            if self.master: fcm.obs_dset.complete = 1
 
     def determinePlotLimits(self):
 
         self.limits = {}
-        self.limits["season"] = 0.
+        self.limits["mag"] = 0.
+        self.limits["cycle"] = {}
+        self.limits["cycle"]["min"] = +1e20
+        self.limits["cycle"]["max"] = -1e20
         for fname in glob.glob(os.path.join(self.output_path,"*.nc")):
             with Dataset(fname) as dataset:
                 if "MeanState" not in dataset.groups: continue
                 group     = dataset.groups["MeanState"]
                 variables = [v for v in group.variables.keys() if v not in group.dimensions.keys()]
                 for vname in variables:
-                    if "season" in vname:
-                        self.limits["season"] = max(self.limits["season"],group.variables[vname].up99)
+                    if "mag" in vname:
+                        self.limits["mag"] = max(self.limits["mag"],group.variables[vname].up99)
+                    if "cycle" in vname and "_bnds" in vname:
+                        self.limits["cycle"]["min"] = min(self.limits["cycle"]["min"],group.variables[vname][...].min())
+                        self.limits["cycle"]["max"] = max(self.limits["cycle"]["max"],group.variables[vname][...].max())
 
     def modelPlots(self,m):
 
@@ -375,120 +372,56 @@ class ConfPEcAn(Confrontation):
         page = [page for page in self.layout.pages if "MeanState" in page.name][0]
         page.priority = ["Beginning","Ending","Strength","Score","Overall"]
 
-        # list pf plots must be in both the benchmark and the model
-        with Dataset(bname) as dset:
-            bplts = [key for key in dset.groups["MeanState"].variables.keys() if "season" in key]
-        with Dataset(fname) as dset:
-            fplts = [key for key in dset.groups["MeanState"].variables.keys() if "season" in key]
-        plots = [v for v in bplts if v in fplts]
-        plots.sort()
+        for y in self.years:
 
-        plot = "magmean"
-        obs = Variable(filename = bname, variable_name = plot, groupname = "MeanState")
-        mod = Variable(filename = fname, variable_name = plot, groupname = "MeanState")
-        page.addFigure("Diurnal magnitude",
-                       plot,
-                       "MNAME_%s.png" % plot,
-                       side   = "MEAN / ENVELOPE",
-                       legend = False)
-        plt.figure(figsize=(5,5),tight_layout=True)
-        plt.polar(obs.time/365.*2*np.pi,obs.data,'-k',alpha=0.45,lw=2)
-        plt.fill_between(obs.time/365.*2*np.pi,obs.data_bnds[:,0],obs.data_bnds[:,1],color='k',alpha=0.1,lw=0)
-        plt.polar(mod.time/365.*2*np.pi,mod.data,'-',color=m.color)
-        plt.fill_between(mod.time/365.*2*np.pi,mod.data_bnds[:,0],mod.data_bnds[:,1],color=m.color,lw=0,alpha=0.3)
-        plt.xticks(bnd_months[:-1]/365.*2*np.pi,lbl_months)
-        plt.ylim(0,self.limits["season"])
-        plt.savefig("%s/%s_%s.png" % (self.output_path,m.name,plot))
-        plt.close()
+            # ---------------------------------------------------------------- #
 
-        # Year polar plots
-        for plot in plots:
-            obs = Variable(filename = bname, variable_name = plot, groupname = "MeanState")
-            mod = Variable(filename = fname, variable_name = plot, groupname = "MeanState")
-            page.addFigure("Diurnal magnitude",
-                           plot,
-                           "MNAME_%s.png" % plot,
-                           side   = plot.split("_")[-1],
-                           legend = False)
             plt.figure(figsize=(5,5),tight_layout=True)
-            plt.polar(obs.time/365.*2*np.pi,obs.data,'-k',alpha=0.6,lw=2)
-            plt.polar(mod.time/365.*2*np.pi,mod.data,'-',color=m.color)
-            plt.xticks(bnd_months[:-1]/365.*2*np.pi,lbl_months)
-            plt.ylim(0,self.limits["season"])
-            plt.savefig("%s/%s_%s.png" % (self.output_path,m.name,plot))
+            has_data = False
+            for name,color,alpha in zip([bname,fname],['k',m.color],[0.6,1.0]):
+                try:
+                    v = Variable(filename=name,variable_name="mag%d" % y,groupname="MeanState")
+                    has_data = True
+                except:
+                    continue
+                plt.polar(v.time/365.*2*np.pi,v.data,'-',color=color,alpha=alpha,lw=2)
+
+            if has_data:
+                plt.xticks(bnd_months[:-1]/365.*2*np.pi,lbl_months)
+                plt.ylim(0,self.limits["mag"])
+                plt.savefig("%s/%s_mag%d.png" % (self.output_path,m.name,y))
+                page.addFigure("%d" % y,
+                               "mag%d" % y,
+                               "MNAME_mag%d.png" % y,
+                               side = "DIURNAL MAGNITUDE",
+                               legend = False)
             plt.close()
 
-        # Season beginning / ending plots
-        def _createSeasonTimingPlot(name):
-            page.addFigure("Seasonal Diurnal Cycle",
-                           name,
-                           "MNAME_%s.png" % name,
-                           side   = "SEASON %s" % (name[1:].upper()),
-                           legend = False)
-            fig,ax = plt.subplots(figsize=(8,4.5),tight_layout=True)
-            slimits = [1e20,-1e20]
-            for plot in plots:
-                cond = plot == plots[0]
-                obs = Variable(filename = bname, variable_name = plot, groupname = "MeanState")
-                mod = Variable(filename = fname, variable_name = plot, groupname = "MeanState")
-                ax.plot(obs.time,obs.data,'-k',alpha=0.2,lw=2,label=self.name if cond else None)
-                ax.plot(mod.time,mod.data,'-',alpha=0.4,color=m.color,label=m.name if cond else None)
-                with Dataset(bname) as dset:
-                    v = dset.groups["MeanState"].variables[plot]
-                    slim = v.getncattr(name)
-                    slimits = [min(slimits[0],slim),max(slimits[1],slim)]
-                    ax.plot(slim,obs.data[obs.time.searchsorted(slim)],'ok',
-                            label="%s Season %s" % (self.name,name[1:].capitalize()) if cond else None)
-                with Dataset(fname) as dset:
-                    v = dset.groups["MeanState"].variables[plot]
-                    slim = v.getncattr(name)
-                    slimits = [min(slimits[0],slim),max(slimits[1],slim)]
-                    ax.plot(slim,mod.data[mod.time.searchsorted(slim)],'o',color=m.color,
-                            label="%s Season %s" % (m.name,name[1:].capitalize()) if cond else None)
-            slimits  = np.asarray(slimits)
-            slimits += np.asarray([-1,1])*(np.diff(slimits))
-            ax.legend(bbox_to_anchor=(0,1.005,1,0.25),loc='lower left',mode='expand',ncol=2,borderaxespad=0,frameon=False)
-            ax.set_xlim(slimits)
-            ind = np.where((bnd_months>=slimits[0])*(bnd_months<=slimits[1]))[0]
-            while ind[-1] >= 12: ind = ind[:-1]
-            ax.set_xticks(bnd_months[ind])
-            ax.set_xticklabels(np.asarray(lbl_months)[ind])
-            ax.set_ylim(0,self.limits["season"])
-            ax.grid(True)
-            ax.set_ylabel("Diurnal Magnitude %s" % (post.UnitStringToMatplotlib(obs.unit)))
-            fig.savefig("%s/%s_%s.png" % (self.output_path,m.name,name))
-            plt.close()
-        _createSeasonTimingPlot("sbegin")
-        _createSeasonTimingPlot("send")
-            
-        # mean Diurnal Cycle
-        obs = Variable(filename = bname, variable_name = "cycle_mean" , groupname = "MeanState")
-        olo = Variable(filename = bname, variable_name = "cycle_lower", groupname = "MeanState")
-        ohi = Variable(filename = bname, variable_name = "cycle_upper", groupname = "MeanState")
-        mod = Variable(filename = fname, variable_name = "cycle_mean" , groupname = "MeanState")
-        mlo = Variable(filename = fname, variable_name = "cycle_lower", groupname = "MeanState")
-        mhi = Variable(filename = fname, variable_name = "cycle_upper", groupname = "MeanState")
-        fig,ax = plt.subplots(figsize=(8,4.5),tight_layout=True)
-        dt = np.diff(obs.time).mean()
-        ax.plot        (obs.time+0.5*dt,obs.data,color='k',alpha=0.5,lw=2)
-        ax.fill_between(obs.time+0.5*dt,olo.data,ohi.data,color='k',alpha=0.09,lw=0)
-        dt = np.diff(mod.time).mean()
-        ax.plot        (mod.time+0.5*dt,mod.data,color=m.color,lw=2)
-        ax.fill_between(mod.time+0.5*dt,mlo.data,mhi.data,color=m.color,alpha=0.15,lw=0)
-        xticks      = np.linspace(0,24,9)
-        xticklabels = ["%2d:00" % t for t in xticks]
-        ax.set_xticks(xticks)
-        ax.set_xticklabels(xticklabels)
-        ax.grid(True)
-        ax.set_ylabel(post.UnitStringToMatplotlib(obs.unit))
-        ax.set_xlabel("local time")
-        plt.savefig("%s/%s_cycle.png" % (self.output_path,m.name))
-        plt.close()
-        page.addFigure("Seasonal Diurnal Cycle",
-                       "cycle",
-                       "MNAME_cycle.png",
-                       side   = "CYCLE",
-                       legend = False)
+            # ---------------------------------------------------------------- #
 
-    def compositePlots(self):
-        pass
+            fig,ax = plt.subplots(figsize=(8,5),tight_layout=True)
+            has_data = False
+            unit = ""
+            for name,color,alpha,lbl in zip([bname,fname],['k',m.color],[0.6,1.0],['Benchmark',m.name]):
+                try:
+                    v = Variable(filename=name,variable_name="cycle%d" % y,groupname="MeanState")
+                    has_data = True
+                    unit = v.unit
+                except:
+                    continue
+                v.plot(ax,color=color,alpha=alpha,lw=2,label=lbl)
+            if has_data:
+                ax.set_xticks(np.linspace(0,1,9)/365+1850)
+                ax.set_xticklabels(["%2d:00" % t for t in np.linspace(0,24,9)])
+                ax.set_ylim(self.limits['cycle']['min'],self.limits['cycle']['max'])
+                ax.grid(True)
+                ax.set_ylabel(post.UnitStringToMatplotlib(unit))
+                ax.set_xlabel("local time")
+                ax.legend(bbox_to_anchor=(0,1.005,1,0.25),loc='lower left',mode='expand',ncol=2,borderaxespad=0,frameon=False)
+                plt.savefig("%s/%s_cycle%d.png" % (self.output_path,m.name,y))
+                page.addFigure("%d" % y,
+                               "cycle%d" % y,
+                               "MNAME_cycle%d.png" % y,
+                               side = "SEASONAL DIURNAL CYCLE",
+                               legend = False)
+            plt.close()
