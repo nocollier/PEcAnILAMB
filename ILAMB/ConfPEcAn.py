@@ -13,6 +13,18 @@ import glob
 class NotEnoughDataInYear(Exception):
     def __str__(self): return "NotEnoughDataInYear"
 
+def getTimeOfDailyMaximum(v):
+    """
+    """
+    spd   = int(round(1/np.diff(v.time_bnds,axis=1).mean()))
+    begin = np.argmin(v.time_bnds[:(spd-1),0] % 1)
+    end   = begin+int(v.time[begin:].size/float(spd))*spd
+    t     = v.time[begin:(begin+spd)] % 1
+    data  = v.data[begin:end,0].reshape((-1,spd) + v.data.shape[1:])
+    data  = data.mean(axis=0)[:,0]
+    tmax  = t[np.argmax(data)]
+    return tmax*24
+    
 def findSeasonalTiming(t,x):
     """Return the beginning and ending time of the season of x.
 
@@ -88,11 +100,13 @@ def getDiurnalDataForGivenYear(var,year):
     if ind.size < spd*360 or data.mask.any(): raise NotEnoughDataInYear
 
     # Reshape the data
-    begin = np.argmin(t[:(spd-1)]%spd)
-    end   = begin+int(t[begin:].size/float(spd))*spd
-    shp   = (-1,spd) + data.shape[1:]
-    data  = data[begin:end].reshape(shp)
-    t     = t   [begin:end].reshape(shp).mean(axis=1)
+    begin  = np.argmin(tb[:(spd-1),0] % 1)
+    end    = begin+int(t[begin:].size/float(spd)-1)*spd
+    shift  = int(round((var.tmax-12)/(var.dt*24)))
+    begin += shift; end += shift
+    shp    = (-1,spd) + data.shape[1:]
+    data   = data[begin:end].reshape(shp)
+    t      = t   [begin:end].reshape(shp).mean(axis=1)
 
     # Diurnal magnitude
     mag = Variable(name = "mag%d" % year,
@@ -222,6 +236,25 @@ class ConfPEcAn(Confrontation):
         lat = np.copy(obs.lat); lon = np.copy(obs.lon)
         obs,mod = il.MakeComparable(obs,mod,clip_ref=False,prune_sites=True,allow_diff_times=True)
 
+        # Some datasets / models return data in UTC, others are local
+        # time. Try to correct by looking at the time of maximum
+        # incident radiation.
+        try:
+            inc = Variable(filename       = self.source,
+                           variable_name  = "LW_IN",
+                           convert_calendar = False)
+            obs.tmax = getTimeOfDailyMaximum(inc)
+        except:
+            obs.tmax = 12.
+        try:
+            inc = m.extractTimeSeries("FSDS",
+                                      convert_calendar = False,
+                                      lats = None if obs.spatial else obs.lat,
+                                      lons = None if obs.spatial else obs.lon)
+            mod.tmax = getTimeOfDailyMaximum(inc)
+        except:
+            mod.tmax = 12.
+        
         return obs,mod
 
     def confront(self,m):
