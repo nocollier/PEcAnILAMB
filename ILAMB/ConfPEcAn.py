@@ -293,6 +293,8 @@ class ConfPEcAn(Confrontation):
             # Encode some names and colors
             fcm.mod_dset.setncatts({"name" :m.name,
                                     "color":m.color,
+                                    "lat":mod.lat[0],
+                                    "lon":mod.lon[0],
                                     "complete":0})
             if self.master:
                 fcm.obs_dset.setncatts({"name" :"Benchmark",
