@@ -12,3 +12,5 @@ overview.png
 # ignore any created pecan.cfg files so these dont cause merge conflicts
 pecan.cfg
 ._pecan.cfg
+ILAMB/pecan.cfg
+ILAMB/._pecan.cfg
