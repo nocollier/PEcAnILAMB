@@ -237,8 +237,8 @@ for i,v in enumerate(Vs):
                transform=ccrs.PlateCarree())
     r0=2.6
     amid = (i+0.5)*da
-    ax.text(-135+r0*np.sin(amid),
-            +29 +r0*np.cos(amid),
+    ax.text(-135+r0*np.cos(amid),
+            +29 +r0*np.sin(amid),
             vname[v],
             ha = 'center',
             va = 'center',
