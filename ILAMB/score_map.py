@@ -126,9 +126,12 @@ data = {'Model':[],'Site':[],'Lat':[],'Lon':[],'Field':[],'Score':[]}
 vname = {'GrossPrimaryProductivity':'gpp',
          'EcosystemRespiration':'reco',
          'NetEcosystemExchange':'nee',
-         'LatentHeat':'le',
-         'SensibleHeat':'sh'}
-for root,subdirs,files in os.walk("./_build"):
+         'LatentHeatFlux':'le',
+         'SensibleHeatFlux':'sh',
+	 'SoilHeatFlux':'g',
+	 'NetRadiation':'netrad'}
+#for root,subdirs,files in os.walk("./_build"):
+for root,subdirs,files in os.walk("/data2/ILAMB/results/CLM5/clm5_14/"):
     files = [f for f in files if "Benchmark" not in f and f.endswith(".nc")]
     for fname in files:
         pname = os.path.join(root,fname)
@@ -160,6 +163,7 @@ for i,site in enumerate(sites):
     X[i] = sdf['Lon'].iloc[0]
     Y[i] = sdf['Lat'].iloc[0]
     if site == "US-xBR": X[i] -= 0.1
+    if site == "US-LPH": X[i] -= 0.1
 X,Y = Smooth(X,Y,10,dt=10,A=3e-4,C=0)
 #plt.show()
 

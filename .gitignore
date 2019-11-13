@@ -3,3 +3,12 @@
 ILAMB/._create_ilamb_cfg.py
 ILAMB/._pecan.cfg
 ILAMB/__pycache__/
+ILAMB/._overview2.png
+ILAMB/overview2.png
+*._overview2.png
+overview2.png
+overview.png
+
+# ignore any created pecan.cfg files so these dont cause merge conflicts
+pecan.cfg
+._pecan.cfg

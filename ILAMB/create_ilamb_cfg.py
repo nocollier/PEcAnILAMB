@@ -3,8 +3,6 @@ import glob
 import os
 
 h1s   = ["Ecosystem and Carbon Cycle","Hydrology Cycle","Radiation and Energy Cycle"]
-#sites= ["CA-Ca1","CA-Ca3","CA-Cbo","CA-Gro","CA-Man","CA-Oas","CA-Ojp","CA-TPD","US-Bar","US-Blo","US-Bn2","US-ChR","US-Cwt","US-CZ3","US-FPe","US-Ha1","US-HBK","US-Ho1","US-LPH","US-MMS","US-MOz","US-NR1","US-Oho","US-Syv","US-UMB","US-WCr","US-xBR"]
-#h1s   = ["Ecosystem and Carbon Cycle","Hydrology Cycle"]
 h2s   = {"Ecosystem and Carbon Cycle":["gpp","nee","reco"],
          "Hydrology Cycle"           :["le"],
 	 "Radiation and Energy Cycle":["h","g","netrad"]}
