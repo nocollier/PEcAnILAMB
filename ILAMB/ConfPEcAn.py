@@ -97,7 +97,6 @@ def getDiurnalDataForGivenYear(var,year):
     t     = var.time     [ind]-datum
     tb    = var.time_bnds[ind]-datum
     data  = var.data     [ind,0]
-    if ind.size < spd*360 or data.mask.any(): raise NotEnoughDataInYear
 
     # Reshape the data
     begin  = np.argmin(tb[:(spd-1),0] % 1)
@@ -113,7 +112,26 @@ def getDiurnalDataForGivenYear(var,year):
                    unit = var.unit,
                    time = t,
                    data = data.max(axis=1)-data.min(axis=1))
-    season   = findSeasonalTiming(mag.time,mag.data)
+
+    # Some of the tower data is 'intelligently' masked which leads to
+    # too much of the data being removed to use my change-detection
+    # algorithm to determine season begin/end.
+    mag.skip = False
+    if mag.data.mask.all(): raise NotEnoughDataInYear # if year is all masked
+    dmag = (mag.data.max()-mag.data.min())
+    if dmag < 1e-14: raise NotEnoughDataInYear # if diurnal mag has no amplitude
+    
+    # Some mask out off seasons, season is taken to be all the data
+    begin_day,end_day = mag.time[mag.data.mask==False][[0,-1]] # begin/end of the mask data
+    if ((begin_day < 2 and end_day < 363) or
+        (begin_day > 2 and end_day > 363)):
+        # this is likely a dataset which is a partial year
+        raise NotEnoughDataInYear
+    elif (begin_day > 2 and end_day < 363):
+        # this is likely a dataset that masks out off-seasons
+        season = np.asarray([begin_day,end_day])
+    else:
+        season   = findSeasonalTiming(mag.time,mag.data)
     centroid = findSeasonalCentroid(mag.time,mag.data)
     mag.season = season
     mag.centroid = centroid
@@ -175,6 +193,7 @@ def DiurnalScalars(obs_mag,mod_mag,obs_cycle,mod_cycle):
     score_uptake = 0
     with np.errstate(under='ignore',over='ignore'):
         score_uptake = np.exp(-np.abs((mod_cycle.uptake-obs_cycle.uptake)/obs_cycle.uptake))
+    #print(obs_cycle.uptake,mod_cycle.uptake,score_uptake)
     return score_sbegin,score_send,score_centroid,score_peak,score_uptake
 
 class ConfPEcAn(Confrontation):
@@ -265,7 +284,7 @@ class ConfPEcAn(Confrontation):
         # What years does the analysis run over?
         obs.year = np.asarray([t.year for t in cftime.num2date(obs.time,"days since 1850-1-1")],dtype=int)
         mod.year = np.asarray([t.year for t in cftime.num2date(mod.time,"days since 1850-1-1")],dtype=int)
-
+        
         # Analysis
         mod_file = os.path.join(self.output_path,"%s_%s.nc"        % (self.name,m.name))
         obs_file = os.path.join(self.output_path,"%s_Benchmark.nc" % (self.name,      ))
@@ -285,14 +304,14 @@ class ConfPEcAn(Confrontation):
             Ssbegin = []; Ssend = []; Scentroid = []; Speak = []; Suptake = []
             obs_years = 0; mod_years = 0
             for y in self.years:
-
+                
                 # First try to get the obs for this year, might not
                 # have enough info in which case we skip the year.
                 try:
                     obs_mag,obs_cycle = getDiurnalDataForGivenYear(obs,y)
                 except NotEnoughDataInYear:
                     continue
-
+                
                 # Output what we must even if the model doesn't have
                 # data here.
                 obs_years += 1
@@ -314,7 +333,7 @@ class ConfPEcAn(Confrontation):
                     mod_mag,mod_cycle = getDiurnalDataForGivenYear(mod,y)
                 except NotEnoughDataInYear:
                     continue
-
+                
                 mod_years += 1
                 Msbegin.append(mod_mag.season[0])
                 Msend  .append(mod_mag.season[1])
@@ -335,9 +354,11 @@ class ConfPEcAn(Confrontation):
                 Suptake.append(suptake)
 
             # Output mean scores/scalars
-            if self.master:
+            if self.master and obs_years > 0:
                 Variable(name = "Number of Years global",unit="1",
                          data = obs_years).toNetCDF4(fcm.obs_dset,group="MeanState")
+                Variable(name = "Computed UTC Shift global",unit="h",
+                         data = obs.tmax-12).toNetCDF4(fcm.obs_dset,group="MeanState")
                 Variable(name = "Season Beginning global",unit="d",
                          data = np.asarray(Osbegin).mean()).toNetCDF4(fcm.obs_dset,group="MeanState")
                 Variable(name = "Season Ending global",unit="d",
@@ -348,28 +369,31 @@ class ConfPEcAn(Confrontation):
                          data = np.asarray(Opeak).mean()).toNetCDF4(fcm.obs_dset,group="MeanState")
                 Variable(name = "Mean Season Uptake global",unit=obs.unit,
                          data = np.asarray(Ouptake).mean()).toNetCDF4(fcm.obs_dset,group="MeanState")
-            Variable(name = "Number of Years global",unit="1",
-                     data = mod_years).toNetCDF4(fcm.mod_dset,group="MeanState")
-            Variable(name = "Season Beginning global",unit="d",
-                     data = np.asarray(Msbegin).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
-            Variable(name = "Season Ending global",unit="d",
-                     data = np.asarray(Msend).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
-            Variable(name = "Season Length global",unit="d",
-                     data = np.asarray(Mslen).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
-            Variable(name = "Diurnal Peak Timing global",unit="h",
-                     data = np.asarray(Mpeak).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
-            Variable(name = "Mean Season Uptake global",unit=mod.unit,
-                     data = np.asarray(Muptake).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
-            Variable(name = "Season Beginning Score global",unit="1",
-                     data = np.asarray(Ssbegin).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
-            Variable(name = "Season Ending Score global",unit="1",
-                     data = np.asarray(Ssend).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
-            Variable(name = "Season Strength Score global",unit="1",
-                     data = np.asarray(Scentroid).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
-            Variable(name = "Diurnal Peak Timing Score global",unit="1",
-                     data = np.asarray(Speak).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
-            Variable(name = "Diurnal Uptake Score global",unit="1",
-                     data = np.asarray(Suptake).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+            if mod_years > 0 :
+                Variable(name = "Number of Years global",unit="1",
+                         data = mod_years).toNetCDF4(fcm.mod_dset,group="MeanState")
+                Variable(name = "Computed UTC Shift global",unit="h",
+                         data = mod.tmax-12).toNetCDF4(fcm.mod_dset,group="MeanState")
+                Variable(name = "Season Beginning global",unit="d",
+                         data = np.asarray(Msbegin).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+                Variable(name = "Season Ending global",unit="d",
+                         data = np.asarray(Msend).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+                Variable(name = "Season Length global",unit="d",
+                         data = np.asarray(Mslen).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+                Variable(name = "Diurnal Peak Timing global",unit="h",
+                         data = np.asarray(Mpeak).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+                Variable(name = "Mean Season Uptake global",unit=mod.unit,
+                         data = np.asarray(Muptake).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+                Variable(name = "Season Beginning Score global",unit="1",
+                         data = np.asarray(Ssbegin).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+                Variable(name = "Season Ending Score global",unit="1",
+                         data = np.asarray(Ssend).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+                Variable(name = "Season Strength Score global",unit="1",
+                         data = np.asarray(Scentroid).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+                Variable(name = "Diurnal Peak Timing Score global",unit="1",
+                         data = np.asarray(Speak).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+                Variable(name = "Diurnal Uptake Score global",unit="1",
+                         data = np.asarray(Suptake).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
 
             # Flag complete
             fcm.mod_dset.complete = 1
