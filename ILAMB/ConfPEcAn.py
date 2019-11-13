@@ -357,6 +357,7 @@ class ConfPEcAn(Confrontation):
 
             # Output mean scores/scalars
             if self.master and obs_years > 0:
+                Ouptake = np.ma.masked_invalid(Ouptake)
                 Variable(name = "Number of Years global",unit="1",
                          data = obs_years).toNetCDF4(fcm.obs_dset,group="MeanState")
                 Variable(name = "Computed UTC Shift global",unit="h",
@@ -370,8 +371,10 @@ class ConfPEcAn(Confrontation):
                 Variable(name = "Diurnal Peak Timing global",unit="h",
                          data = np.asarray(Opeak).mean()).toNetCDF4(fcm.obs_dset,group="MeanState")
                 Variable(name = "Mean Season Uptake global",unit=obs.unit,
-                         data = np.asarray(Ouptake).mean()).toNetCDF4(fcm.obs_dset,group="MeanState")
+                         data = Ouptake.mean()).toNetCDF4(fcm.obs_dset,group="MeanState")
             if mod_years > 0 :
+                Muptake = np.ma.masked_invalid(Muptake)
+                Suptake = np.ma.masked_invalid(Suptake)
                 Variable(name = "Number of Years global",unit="1",
                          data = mod_years).toNetCDF4(fcm.mod_dset,group="MeanState")
                 Variable(name = "Computed UTC Shift global",unit="h",
@@ -385,7 +388,7 @@ class ConfPEcAn(Confrontation):
                 Variable(name = "Diurnal Peak Timing global",unit="h",
                          data = np.asarray(Mpeak).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
                 Variable(name = "Mean Season Uptake global",unit=mod.unit,
-                         data = np.asarray(Muptake).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+                         data = Muptake.mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
                 Variable(name = "Season Beginning Score global",unit="1",
                          data = np.asarray(Ssbegin).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
                 Variable(name = "Season Ending Score global",unit="1",
@@ -395,7 +398,7 @@ class ConfPEcAn(Confrontation):
                 Variable(name = "Diurnal Peak Timing Score global",unit="1",
                          data = np.asarray(Speak).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
                 Variable(name = "Diurnal Uptake Score global",unit="1",
-                         data = np.asarray(Suptake).mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
+                         data = Suptake.mean()).toNetCDF4(fcm.mod_dset,group="MeanState")
 
             # Flag complete
             fcm.mod_dset.complete = 1
