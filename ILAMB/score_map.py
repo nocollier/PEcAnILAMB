@@ -5,8 +5,14 @@ import os
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import numpy as np
+import argparse
 
 pi = np.pi
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--build_dir', dest="build_dir", metavar='build_dir', type=str, nargs=1,default=["./_build"],
+                    help='path of where to save the output')
+args = parser.parse_args()
 
 def Smooth(x0,y0,r,A=1.,C=0.1,dt=0.1,k=1.,N=1000):
     """
@@ -127,11 +133,12 @@ vname = {'GrossPrimaryProductivity':'gpp',
          'EcosystemRespiration':'reco',
          'NetEcosystemExchange':'nee',
          'LatentHeatFlux':'le',
+         'LatentHeat':'le',
          'SensibleHeatFlux':'sh',
+         'SensibleHeat':'sh',
 	 'SoilHeatFlux':'g',
-	 'NetRadiation':'netrad'}
-#for root,subdirs,files in os.walk("./_build"):
-for root,subdirs,files in os.walk("/data2/ILAMB/results/CLM5/clm5_14/"):
+	 'NetRadiation':'rnet'}
+for root,subdirs,files in os.walk(args.build_dir[0]):
     files = [f for f in files if "Benchmark" not in f and f.endswith(".nc")]
     for fname in files:
         pname = os.path.join(root,fname)
@@ -155,18 +162,25 @@ da = 2*pi/len(Vs)
 cmap = plt.get_cmap('stoplight')
 cmap.set_under('0.4')
 
+# cache original locations
 sites = df['Site'].unique()
 X = np.zeros(sites.size)
 Y = np.zeros(X.size)
 for i,site in enumerate(sites):
     sdf = df.loc[df['Site']==site]
     X[i] = sdf['Lon'].iloc[0]
-    Y[i] = sdf['Lat'].iloc[0]
-    if site == "US-xBR": X[i] -= 0.1
-    if site == "US-LPH": X[i] -= 0.1
-X,Y = Smooth(X,Y,10,dt=10,A=3e-4,C=0)
-#plt.show()
+    Y[i] = sdf['Lat'].iloc[0]    
+x0 = {}
+y0 = {}
+for i,site in enumerate(sites):
+    x0[site] = X[i]
+    y0[site] = Y[i]
 
+# slightly perturb all locations randomly in case some are coincident
+X += (np.random.rand(X.size)-0.5)*0.1
+Y += (np.random.rand(X.size)-0.5)*0.1
+
+X,Y = Smooth(X,Y,10,dt=10,A=3e-4,C=0)
 
 xs = {}
 ys = {}
@@ -190,8 +204,19 @@ for site in sites:
                    linewidth=0,
                    s=1000,
                    facecolor=cmap(s),
-                   transform=ccrs.PlateCarree())
+                   transform=ccrs.PlateCarree(),
+                   zorder=1)
 
+        ax.annotate("",
+                    xy=(x0[site],y0[site]), xycoords='data',
+                    xytext=(xs[site],ys[site]), textcoords='data',
+                    transform=ccrs.PlateCarree(),
+                    zorder=0,
+                    arrowprops=dict(arrowstyle="wedge,tail_width=2.9,shrink_factor=0.3",
+                                    color="0.6",
+                                    patchB=None,
+                                    shrinkB=0,
+                                    connectionstyle="arc3,rad=-0.3"))
 
 ax.set_extent([-170,-62,23.5,73],ccrs.PlateCarree())
 ax.add_feature(cfeature.NaturalEarthFeature('physical','land','110m',
