@@ -36,7 +36,7 @@ for h1 in h1s:
                 with Dataset(pname) as dset:
                     poss = [v for v in dset.variables.keys() if v.split("_")[0] == vname.upper()]
                     if poss:
-                        possible += [v for v in poss if ((v not in possible) and (v != vname))]
+                        possible += [v for v in poss if ((v not in possible) and (v != vname) and "TEST" not in v)]
                         dsetstr  += "\n[%s]" % dname
                         dsetstr  += "\nsource = %s\n" % rname
         print("alternate_vars = %s" % (",".join(possible)))
