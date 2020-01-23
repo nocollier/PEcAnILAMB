@@ -1,0 +1,13 @@
+Here is what I see as some of the remaining issues to get a first diurnal benchmarking paper out focused on CLM/ELM (maybe FATES) site level runs:
+
+* How to define the growing season/dormant season to apply to all variables so we can better benchmark/score some of th variables like sensible heat which has a stron annual cycle
+
+* How to deal with messy AMF data and missing variables.  Can we come up with a way to calculate missing variables?
+
+* What are the expected errors in AMF data, do we need to account for this in scoring?
+
+* Can we add the diurnal functional benchmarks or use existing at the diurnal scale
+
+* Model parameterization/spin-up:  Probably good on this, just want to be sure I run it by CLM folks.
+
+* What AMF sites - related to 2
